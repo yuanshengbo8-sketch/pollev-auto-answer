@@ -1,0 +1,12 @@
+{
+  "url": "https://pollev.com/jiancai",
+  "screen_name": "",
+  "weekday": "wednesday",
+  "start_time": "18:00",
+  "start_early_minutes": 5,
+  "duration_hours": 3,
+  "poll_interval_seconds": 1.0,
+  "reload_if_idle_minutes": 10,
+  "headless": false,
+  "open_ended_text": ""
+}

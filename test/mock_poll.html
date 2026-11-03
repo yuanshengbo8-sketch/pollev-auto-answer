@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Mock Poll Everywhere</title>
+<style>
+  body { font-family: sans-serif; margin: 0; }
+  #participate_presenter_bar { background: #eee; padding: 8px 16px; display: flex; justify-content: space-between; }
+  main { padding: 16px; }
+  .mdc-radio input { opacity: 0; width: 20px; height: 20px; }
+  .option-btn { display: block; margin: 6px 0; padding: 10px; border: 1px solid #888; background: #fff; width: 300px; text-align: left; }
+  .option-btn.selected { background: #cde; }
+  .hidden { display: none; }
+  #screen-name-dialog { position: fixed; right: 0; top: 0; width: 320px; height: 100%; background: #fff; border-left: 1px solid #ccc; padding: 16px; }
+</style>
+</head>
+<body>
+<div id="participate_presenter_bar">
+  <span>Waiting…</span>
+  <div id="participant_screen_name">
+    <button type="button" onclick="document.getElementById('screen-name-dialog').classList.remove('hidden')">
+      <div data-participate--presenter-bar-target="respondingAs">Responding as guest123</div>
+    </button>
+  </div>
+</div>
+
+<div id="screen-name-dialog" role="dialog">
+  <h1>Welcome to mock's presentation!</h1>
+  <form onsubmit="setName(event)">
+    <label>Name <input type="text" name="participant_presenter_relationship[screen_name]" id="participant_presenter_relationship_screen_name"></label>
+    <button type="submit">Continue</button>
+    <button type="button" onclick="document.getElementById('screen-name-dialog').classList.add('hidden')">Skip</button>
+  </form>
+</div>
+
+<main id="main-content">
+  <div id="active_tab_content">
+    <div id="waiting">
+      <h1>Waiting for mock's presentation to begin...</h1>
+      <p>Stay put.</p>
+    </div>
+  </div>
+</main>
+
+<script>
+  const area = document.getElementById('active_tab_content');
+  const log = [];
+  window.__mockLog = log;
+
+  function setName(e) {
+    e.preventDefault();
+    const v = document.getElementById('participant_presenter_relationship_screen_name').value;
+    document.querySelector('[data-participate--presenter-bar-target=respondingAs]').textContent = 'Responding as ' + v;
+    document.getElementById('screen-name-dialog').classList.add('hidden');
+    log.push('name:' + v);
+  }
+
+  // 题目 1：原生 radio + Submit 按钮（Material 风格）
+  function showQ1() {
+    area.innerHTML = `
+      <h1 class="text-xl font-semibold">Q1: Which number is prime?</h1>
+      <form action="/mock/activities/1/responses" method="post" onsubmit="submitQ(event, 1)">
+        <fieldset>
+          ${['4','7','9','12'].map((t,i)=>`<label class="mdc-radio"><input type="radio" name="response[option_id]" value="${i}"> ${t}</label><br>`).join('')}
+        </fieldset>
+        <button type="submit" class="mdc-button">Submit</button>
+      </form>`;
+  }
+
+  // 题目 2：按钮式选项，点选即提交（无单独提交按钮）
+  function showQ2() {
+    area.innerHTML = `
+      <h1 class="text-xl font-semibold">Q2: Pick a color</h1>
+      <div class="options">
+        ${['Red','Green','Blue'].map((t,i)=>`<button type="button" class="option-btn" data-option-id="${i}" onclick="pickQ2(this)">${t}</button>`).join('')}
+      </div>`;
+  }
+
+  // 题目 3：checkbox 多选 + Submit
+  function showQ3() {
+    area.innerHTML = `
+      <h1 class="text-xl font-semibold">Q3: Select all that apply</h1>
+      <form action="/mock/activities/3/responses" method="post" onsubmit="submitQ(event, 3)">
+        ${['A','B','C'].map((t,i)=>`<label><input type="checkbox" name="response[option_ids][]" value="${i}"> ${t}</label><br>`).join('')}
+        <button type="submit">Submit</button>
+      </form>`;
+  }
+
+  function submitQ(e, n) {
+    e.preventDefault();
+    const picked = [...e.target.querySelectorAll('input:checked')].map(i => i.value);
+    if (!picked.length) { alert('nothing selected'); return; }
+    log.push('q' + n + ':' + picked.join(','));
+    area.innerHTML = `<h1>Q${n} answered</h1><p>Thank you, your response has been submitted.</p>`;
+  }
+  function pickQ2(btn) {
+    log.push('q2:' + btn.dataset.optionId);
+    area.innerHTML = `<h1>Q2 answered</h1><p>Your response has been submitted. <button type="button">Change response</button></p>`;
+  }
+  function showWaiting() {
+    area.innerHTML = `<div id="waiting"><h1>Waiting for mock's presentation to begin...</h1></div>`;
+  }
+
+  setTimeout(showQ1, 4000);
+  setTimeout(showWaiting, 14000);
+  setTimeout(showQ2, 17000);
+  setTimeout(showQ3, 27000);
+  setTimeout(showWaiting, 37000);
+</script>
+</body>
+</html>
