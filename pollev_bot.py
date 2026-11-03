@@ -3,15 +3,16 @@
 Poll Everywhere 自动答题助手（Windows / Mac 通用）
 
 功能：
-  1. 打开 https://pollev.com/<presenter>，自动填写屏幕名（Screen name）
-  2. 到了设定时间（默认每周三 18:00）开始监测页面
+  1. 打开 https://pollev.com/<老师用户名>，自动填写屏幕名（Screen name）
+  2. 启动后立刻开始监测页面，直到你关掉程序
   3. 一旦出现选择题，随机选一个选项并点击提交；绝不漏题
-  4. 所有动作写入 logs/pollev.log，每次提交后截图保存到 logs/
+  4. 运行期间阻止电脑息屏 / 休眠
+  5. 所有动作写入 logs/pollev.log，每次提交后截图保存到 logs/
 
 用法：
-  python pollev_bot.py            # 常驻：等到下一个周三 18:00 自动开始
-  python pollev_bot.py --now      # 立刻开始监测（测试用）
-  python pollev_bot.py --now --minutes 10   # 立刻开始，只监测 10 分钟
+  python pollev_bot.py                 # 上课前打开即可，一直监测到你关掉
+  python pollev_bot.py --minutes 90    # 只监测 90 分钟后自动退出
+  python pollev_bot.py --url xxx --name xxx   # 临时覆盖 config.json 里的网址 / 名字
 """
 from __future__ import annotations
 
@@ -38,23 +39,12 @@ LOG_DIR = BASE_DIR / "logs"
 PROFILE_DIR = BASE_DIR / "browser-profile"
 
 DEFAULT_CONFIG = {
-    "url": "https://pollev.com/jiancai",
+    "url": "",
     "screen_name": "",
-    "weekday": "wednesday",
-    "start_time": "18:00",
-    "start_early_minutes": 5,
-    "duration_hours": 3,
     "poll_interval_seconds": 1.0,
     "reload_if_idle_minutes": 10,
     "headless": False,
     "open_ended_text": "",
-}
-
-WEEKDAYS = {
-    "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
-    "friday": 4, "saturday": 5, "sunday": 6,
-    "周一": 0, "周二": 1, "周三": 2, "周四": 3, "周五": 4, "周六": 5, "周日": 6,
-    "mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6,
 }
 
 # ---------------------------------------------------------------- logging
@@ -87,48 +77,106 @@ def save_config(cfg: dict) -> None:
         json.dump(cfg, f, ensure_ascii=False, indent=2)
 
 
-def ensure_screen_name_configured(cfg: dict) -> dict:
+def normalize_url(raw: str) -> str:
+    """接受完整网址或老师的用户名，统一成 https://pollev.com/<用户名> 形式。"""
+    raw = raw.strip().strip("/")
+    if not raw:
+        return ""
+    if raw.lower().startswith(("http://", "https://", "file://")):
+        return raw
+    raw = raw.replace("pollev.com/", "").replace("www.", "").strip("/")
+    return f"https://pollev.com/{raw}"
+
+
+def ask(prompt: str) -> str:
+    try:
+        return input(prompt).strip()
+    except EOFError:
+        return ""
+
+
+def ensure_configured(cfg: dict) -> dict:
+    """第一次运行：让用户填网址和名字，保存到 config.json。"""
+    changed = False
+    if not cfg.get("url"):
+        url = normalize_url(ask(
+            "第一次运行：请输入 Poll Everywhere 网址，或者老师的用户名\n"
+            "（例如 https://pollev.com/jiancai 或直接输入 jiancai），然后回车："))
+        if not url:
+            log.error("没有填写网址，退出。也可以直接编辑 config.json 里的 url。")
+            sys.exit(1)
+        cfg["url"] = url
+        changed = True
     if not cfg.get("screen_name"):
-        try:
-            name = input("第一次运行：请输入你在 Poll Everywhere 上要显示的名字，然后回车：").strip()
-        except EOFError:
-            name = ""
+        name = ask("请输入你在 Poll Everywhere 上要显示的名字，然后回车：")
         if not name:
             log.error("没有填写名字，退出。也可以直接编辑 config.json 里的 screen_name。")
             sys.exit(1)
         cfg["screen_name"] = name
+        changed = True
+    if changed:
         save_config(cfg)
-        log.info("已保存名字到 config.json：%s", name)
+        log.info("已保存到 config.json：网址=%s，名字=%s（以后想改就编辑这个文件）", cfg["url"], cfg["screen_name"])
     return cfg
 
 
 # ---------------------------------------------------------------- keep awake
 class KeepAwake:
-    """监测期间阻止电脑休眠（Windows 用系统 API，Mac 用 caffeinate）。"""
+    """程序运行期间阻止电脑息屏和休眠。
+
+    Windows：调用系统 API SetThreadExecutionState，声明"需要系统和显示器保持开启"；
+             每 60 秒重新声明一次，确保不会被系统收回。
+    Mac：    启动 caffeinate -dims（d=显示器不息屏，i=系统不空闲休眠，m=磁盘不休眠，s=插电时不休眠）。
+    Linux：  用 systemd-inhibit 时需要外部命令，这里只做尽力而为。
+    注意：公司/学校电脑的"强制锁屏"策略无法被程序绕过。
+    """
+
+    ES_CONTINUOUS, ES_SYSTEM_REQUIRED, ES_DISPLAY_REQUIRED = 0x80000000, 0x1, 0x2
 
     def __init__(self):
         self.proc = None
+        self.system = platform.system()
+        self.last_refresh = 0.0
+
+    def _assert_windows(self):
+        import ctypes
+        flags = self.ES_CONTINUOUS | self.ES_SYSTEM_REQUIRED | self.ES_DISPLAY_REQUIRED
+        if ctypes.windll.kernel32.SetThreadExecutionState(flags) == 0:
+            raise OSError("SetThreadExecutionState 返回 0")
 
     def __enter__(self):
-        system = platform.system()
         try:
-            if system == "Windows":
-                import ctypes
-                es_continuous, es_system, es_display = 0x80000000, 0x1, 0x2
-                ctypes.windll.kernel32.SetThreadExecutionState(es_continuous | es_system | es_display)
-            elif system == "Darwin":
+            if self.system == "Windows":
+                self._assert_windows()
+                log.info("已开启防息屏 / 防休眠（Windows）")
+            elif self.system == "Darwin":
                 self.proc = subprocess.Popen(["caffeinate", "-dims"])
+                log.info("已开启防息屏 / 防休眠（Mac caffeinate）")
+            else:
+                log.info("当前系统不是 Windows/Mac，请自行关闭自动息屏")
         except Exception as e:  # pragma: no cover
-            log.warning("无法阻止休眠：%s", e)
+            log.warning("无法开启防息屏：%s（请手动把电源设置里的息屏/休眠改为“从不”）", e)
+        self.last_refresh = time.time()
         return self
+
+    def refresh(self):
+        """在主循环里周期性调用，Windows 下每 60 秒重新声明一次。"""
+        if self.system != "Windows" or time.time() - self.last_refresh < 60:
+            return
+        try:
+            self._assert_windows()
+        except Exception as e:
+            log.debug("防息屏续期失败：%s", e)
+        self.last_refresh = time.time()
 
     def __exit__(self, *exc):
         try:
-            if platform.system() == "Windows":
+            if self.system == "Windows":
                 import ctypes
-                ctypes.windll.kernel32.SetThreadExecutionState(0x80000000)
+                ctypes.windll.kernel32.SetThreadExecutionState(self.ES_CONTINUOUS)
             if self.proc:
                 self.proc.terminate()
+            log.info("已恢复系统默认的息屏 / 休眠设置")
         except Exception:
             pass
 
@@ -256,9 +304,9 @@ CABLE_CONNECTED_JS = r"""
 
 # ---------------------------------------------------------------- bot
 class PollEvBot:
-    def __init__(self, cfg: dict, url: str | None = None):
+    def __init__(self, cfg: dict):
         self.cfg = cfg
-        self.url = url or cfg["url"]
+        self.url = cfg["url"]
         self.name = cfg["screen_name"]
         self.answered: dict[str, float] = {}
         self.attempts: dict[str, int] = {}
@@ -453,13 +501,17 @@ class PollEvBot:
             self.open_site()
 
     # ---------- main loop
-    def monitor(self, until: dt.datetime):
+    def monitor(self, until: dt.datetime | None = None):
         interval = float(self.cfg.get("poll_interval_seconds", 1.0))
-        log.info("开始监测，直到 %s（名字：%s）", until.strftime("%Y-%m-%d %H:%M"), self.name)
-        with sync_playwright() as pw, KeepAwake():
+        if until:
+            log.info("开始监测，直到 %s（名字：%s）", until.strftime("%Y-%m-%d %H:%M"), self.name)
+        else:
+            log.info("开始监测（名字：%s）。关掉这个窗口或按 Ctrl+C 即可停止。", self.name)
+        with sync_playwright() as pw, KeepAwake() as awake:
             self.start_browser(pw)
-            while dt.datetime.now() < until:
+            while until is None or dt.datetime.now() < until:
                 try:
+                    awake.refresh()
                     q = self.find_question()
                     if q:
                         sig = q["signature"]
@@ -499,56 +551,23 @@ class PollEvBot:
                 pass
 
 
-# ---------------------------------------------------------------- schedule
-def next_window(cfg: dict, now: dt.datetime) -> tuple[dt.datetime, dt.datetime]:
-    wd = WEEKDAYS[str(cfg["weekday"]).strip().lower()]
-    hh, mm = (int(x) for x in str(cfg["start_time"]).split(":"))
-    early = dt.timedelta(minutes=int(cfg.get("start_early_minutes", 5)))
-    dur = dt.timedelta(hours=float(cfg.get("duration_hours", 3)))
-    for d in range(0, 8):
-        day = (now + dt.timedelta(days=d)).date()
-        if day.weekday() != wd:
-            continue
-        start = dt.datetime.combine(day, dt.time(hh, mm)) - early
-        end = start + early + dur
-        if end > now:
-            return start, end
-    raise RuntimeError("计算不出下一次时间")
-
-
+# ---------------------------------------------------------------- main
 def main():
     ap = argparse.ArgumentParser(description="Poll Everywhere 自动答题助手")
-    ap.add_argument("--now", action="store_true", help="立即开始监测，不等时间表")
-    ap.add_argument("--minutes", type=float, default=None, help="配合 --now：监测多少分钟（默认按 duration_hours）")
-    ap.add_argument("--url", default=None, help="覆盖 config.json 里的网址（测试用）")
-    ap.add_argument("--name", default=None, help="覆盖 config.json 里的名字")
-    ap.add_argument("--once", action="store_true", help="只跑一次时间窗，结束后退出（默认常驻循环）")
+    ap.add_argument("--minutes", type=float, default=None, help="监测多少分钟后自动退出（默认一直运行）")
+    ap.add_argument("--url", default=None, help="临时覆盖 config.json 里的网址（可填完整网址或老师用户名）")
+    ap.add_argument("--name", default=None, help="临时覆盖 config.json 里的名字")
     args = ap.parse_args()
 
     cfg = load_config()
+    if args.url:
+        cfg["url"] = normalize_url(args.url)
     if args.name:
         cfg["screen_name"] = args.name
-    cfg = ensure_screen_name_configured(cfg)
+    cfg = ensure_configured(cfg)
 
-    if args.now:
-        minutes = args.minutes if args.minutes is not None else float(cfg["duration_hours"]) * 60
-        until = dt.datetime.now() + dt.timedelta(minutes=minutes)
-        PollEvBot(cfg, url=args.url).monitor(until)
-        return
-
-    while True:
-        now = dt.datetime.now()
-        start, end = next_window(cfg, now)
-        if now < start:
-            wait = (start - now).total_seconds()
-            log.info("下一次自动开始：%s（还有 %.1f 小时）。请保持这个窗口开着、电脑不要关机。",
-                     start.strftime("%Y-%m-%d %H:%M"), wait / 3600)
-            while dt.datetime.now() < start:
-                time.sleep(min(30, max(1, (start - dt.datetime.now()).total_seconds())))
-        PollEvBot(cfg, url=args.url).monitor(end)
-        if args.once:
-            break
-        time.sleep(60)
+    until = dt.datetime.now() + dt.timedelta(minutes=args.minutes) if args.minutes else None
+    PollEvBot(cfg).monitor(until)
 
 
 if __name__ == "__main__":
