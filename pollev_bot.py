@@ -400,6 +400,26 @@ class PollEvBot:
             log.debug("find_question 出错：%s", e)
             return None
 
+    def _click(self, data_id: str, what: str) -> bool:
+        """点击带 data-pb-id 标记的元素。
+
+        元素在点击过程中被页面替换（老师切题、页面重新渲染）时不抛异常，返回 False，
+        让主循环立刻重新扫描，而不是刷新整个页面浪费几秒。
+        """
+        loc = self.page.locator(f"[data-pb-id='{data_id}']").first
+        last_err = None
+        for force in (False, True):
+            try:
+                if not loc.count():
+                    log.info("%s已从页面上消失（题目被切换或重新渲染），立即重新扫描", what)
+                    return False
+                loc.click(timeout=1500, force=force)
+                return True
+            except Exception as e:
+                last_err = e
+        log.info("点击%s失败（%s），立即重新扫描", what, str(last_err).splitlines()[0] if last_err else "")
+        return False
+
     def answer(self, q: dict) -> bool:
         page = self.page
         sig = q["signature"]
@@ -419,31 +439,36 @@ class PollEvBot:
             choice = random.choice(q["options"])
             option_id = choice["id"]
             log.info("随机选择：「%s」", choice["label"])
-            target = page.locator(f"[data-pb-id='{choice['clickId']}']").first
-            try:
-                target.click(timeout=4000)
-            except Exception:
-                target.click(force=True, timeout=4000)
+            if not self._click(choice["clickId"], "选项"):
+                return False
             page.wait_for_timeout(400)
             st = page.evaluate(CHECK_STATE_JS, {"optionId": option_id, "submitId": q.get("submitId")})
             if q["kind"] == "input" and st.get("optionChecked") is False:
-                page.locator(f"[data-pb-id='{option_id}']").first.check(force=True)
+                try:
+                    page.locator(f"[data-pb-id='{option_id}']").first.check(force=True, timeout=1500)
+                except Exception:
+                    log.info("选项已从页面上消失，立即重新扫描")
+                    return False
                 page.wait_for_timeout(300)
 
         # 提交按钮可能是选完才出现的，重新找一次
         fresh = self.find_question()
         submit_id = (fresh or {}).get("submitId") or q.get("submitId")
         if submit_id:
-            btn = page.locator(f"[data-pb-id='{submit_id}']").first
-            try:
-                btn.click(timeout=4000)
-            except Exception:
-                btn.click(force=True, timeout=4000)
+            if not self._click(submit_id, "提交按钮"):
+                # 按钮消失也可能是点选项时已经自动提交了，确认一下
+                st = page.evaluate(CHECK_STATE_JS, {"optionId": None, "submitId": None})
+                if st.get("successText"):
+                    self.answered[sig] = time.time()
+                    self.snapshot("answered")
+                    log.info("提交成功 ✅（选项点下去就已提交）")
+                    return True
+                return False
             log.info("已点击提交")
         else:
             log.info("没有单独的提交按钮，视为点选即提交")
 
-        ok = self.wait_submitted(option_id, submit_id)
+        ok = self.wait_submitted(sig, option_id, submit_id)
         if ok:
             self.answered[sig] = time.time()
             self.snapshot("answered")
@@ -453,7 +478,12 @@ class PollEvBot:
             log.warning("无法确认提交是否成功，稍后重试")
         return ok
 
-    def wait_submitted(self, option_id, submit_id, timeout=10.0) -> bool:
+    def wait_submitted(self, sig, option_id, submit_id, timeout=10.0) -> bool:
+        """确认答案真的交上去了。
+
+        只看"按钮/选项不见了"不够：页面重新渲染同一道题时它们也会消失。
+        所以消失后再扫一遍页面：同一道题还在、没有选中项、也没有已提交提示，就判定没答上。
+        """
         end = time.time() + timeout
         while time.time() < end:
             try:
@@ -462,12 +492,18 @@ class PollEvBot:
                 st = {}
             if st.get("successText"):
                 return True
-            if submit_id and not st.get("submitVisible"):
-                return True
-            if not submit_id and option_id and not st.get("optionExists"):
-                return True
-            if not submit_id and option_id and st.get("optionDisabled"):
-                return True
+            if submit_id:
+                changed = not st.get("submitVisible")
+            else:
+                changed = bool(option_id) and (not st.get("optionExists") or bool(st.get("optionDisabled")))
+            if changed:
+                fresh = self.find_question()
+                if not fresh or fresh["signature"] != sig:
+                    return True          # 题目已换成结果页 / 等待页 / 下一题
+                if any(o.get("checked") for o in fresh["options"]) and not fresh.get("submitId"):
+                    return True          # 同一道题还在，但已显示选中且没有可点的提交按钮
+                log.info("题目被重新渲染，答案没有生效，立即重答")
+                return False
             self.page.wait_for_timeout(500)
         return False
 
@@ -522,9 +558,12 @@ class PollEvBot:
                             self.answered[sig] = time.time()
                             self.open_site()
                         else:
-                            self.answer(q)
-                            if sig not in self.answered and self.attempts[sig] % 3 == 0:
-                                self.open_site()
+                            ok = self.answer(q)
+                            if not ok:
+                                if self.attempts[sig] % 3 == 0:
+                                    self.open_site()
+                                time.sleep(0.2)          # 没答上：几乎不等待，马上重新扫描
+                                continue
                     else:
                         self.health_check()
                     time.sleep(interval)

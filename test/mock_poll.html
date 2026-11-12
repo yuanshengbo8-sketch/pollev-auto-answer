@@ -97,6 +97,28 @@
     log.push('q2:' + btn.dataset.optionId);
     area.innerHTML = `<h1>Q2 answered</h1><p>Your response has been submitted. <button type="button">Change response</button></p>`;
   }
+  // 题目 4：第一次按下鼠标的瞬间，整道题重新渲染并下移（模拟页面刷新题目），
+  // 原来的选项元素消失，这次点击一定落空、答案不会生效。程序应识别出没答上并立即重答。
+  let q4Rerendered = false;
+  function showQ4(shift) {
+    area.innerHTML = `
+      <h1 class="text-xl font-semibold">Q4: Re-rendered while clicking</h1>
+      <div style="height:${shift ? 120 : 0}px"></div>
+      <div class="options" onmousedown="rerenderQ4()">
+        ${['X','Y','Z'].map((t,i)=>`<button type="button" class="option-btn" data-option-id="${i}" onclick="pickQ4(this)">${t}</button>`).join('')}
+      </div>`;
+  }
+  function rerenderQ4() {
+    if (q4Rerendered) return;
+    q4Rerendered = true;
+    log.push('q4:rerender');
+    showQ4(true);
+  }
+  function pickQ4(btn) {
+    log.push('q4:' + btn.dataset.optionId);
+    area.innerHTML = `<h1>Q4 answered</h1><p>Your response has been submitted.</p>`;
+  }
+
   function showWaiting() {
     area.innerHTML = `<div id="waiting"><h1>Waiting for mock's presentation to begin...</h1></div>`;
   }
@@ -106,6 +128,8 @@
   setTimeout(showQ2, 17000);
   setTimeout(showQ3, 27000);
   setTimeout(showWaiting, 37000);
+  setTimeout(() => showQ4(false), 40000);
+  setTimeout(showWaiting, 52000);
 </script>
 </body>
 </html>
