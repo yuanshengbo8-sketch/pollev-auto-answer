@@ -20,8 +20,10 @@ import argparse
 import datetime as dt
 import json
 import logging
+import os
 import platform
 import random
+import re
 import subprocess
 import sys
 import time
@@ -181,6 +183,99 @@ class KeepAwake:
             pass
 
 
+# ---------------------------------------------------------------- attention
+class Attention:
+    """出现新题目时提醒你（不出声音，上课不会吵到别人）。
+
+    Windows：让浏览器窗口和程序窗口在任务栏上闪烁，直到你点开那个窗口为止。
+    Mac：    弹出一条系统通知。
+    """
+
+    def __init__(self):
+        self.system = platform.system()
+
+    def notify(self, text: str):
+        try:
+            if self.system == "Windows":
+                n = self._flash_windows()
+                log.info("已在任务栏闪烁提醒（%d 个窗口）", n)
+            elif self.system == "Darwin":
+                subprocess.Popen(
+                    ["osascript", "-e", "on run argv", "-e",
+                     'display notification (item 1 of argv) with title "Poll Everywhere 有新题目"',
+                     "-e", "end run", "--", text[:120] or "有新题目"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                log.info("已发送系统通知提醒")
+        except Exception as e:
+            log.debug("提醒失败：%s", e)
+
+    @staticmethod
+    def _descendant_pids() -> set[int]:
+        """本程序及其所有子进程（包括 Playwright 启动的 Chromium）的进程号。"""
+        import ctypes
+        from ctypes import wintypes
+
+        class PROCESSENTRY32W(ctypes.Structure):
+            _fields_ = [("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD),
+                        ("th32ProcessID", wintypes.DWORD), ("th32DefaultHeapID", ctypes.c_size_t),
+                        ("th32ModuleID", wintypes.DWORD), ("cntThreads", wintypes.DWORD),
+                        ("th32ParentProcessID", wintypes.DWORD), ("pcPriClassBase", ctypes.c_long),
+                        ("dwFlags", wintypes.DWORD), ("szExeFile", ctypes.c_wchar * 260)]
+
+        k32 = ctypes.windll.kernel32
+        k32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+        snap = k32.CreateToolhelp32Snapshot(0x2, 0)  # TH32CS_SNAPPROCESS
+        children: dict[int, list[int]] = {}
+        try:
+            entry = PROCESSENTRY32W()
+            entry.dwSize = ctypes.sizeof(entry)
+            ok = k32.Process32FirstW(snap, ctypes.byref(entry))
+            while ok:
+                children.setdefault(entry.th32ParentProcessID, []).append(entry.th32ProcessID)
+                ok = k32.Process32NextW(snap, ctypes.byref(entry))
+        finally:
+            k32.CloseHandle(snap)
+        found, stack = set(), [os.getpid()]
+        while stack:
+            pid = stack.pop()
+            if pid in found:
+                continue
+            found.add(pid)
+            stack.extend(children.get(pid, []))
+        return found
+
+    def _flash_windows(self) -> int:
+        import ctypes
+        from ctypes import wintypes
+
+        class FLASHWINFO(ctypes.Structure):
+            _fields_ = [("cbSize", wintypes.UINT), ("hwnd", wintypes.HWND), ("dwFlags", wintypes.DWORD),
+                        ("uCount", wintypes.UINT), ("dwTimeout", wintypes.DWORD)]
+
+        u32 = ctypes.windll.user32
+        pids = self._descendant_pids()
+        targets = []
+
+        @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        def on_window(hwnd, _):
+            if not u32.IsWindowVisible(hwnd) or u32.GetWindowTextLengthW(hwnd) == 0:
+                return True
+            pid = wintypes.DWORD()
+            u32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            if pid.value in pids:
+                targets.append(hwnd)
+            return True
+
+        u32.EnumWindows(on_window, 0)
+        console = ctypes.windll.kernel32.GetConsoleWindow()
+        if console:
+            targets.append(console)
+        for hwnd in targets:
+            info = FLASHWINFO(ctypes.sizeof(FLASHWINFO), hwnd, 0x3 | 0xC, 0, 0)  # FLASHW_ALL | FLASHW_TIMERNOFG
+            u32.FlashWindowEx(ctypes.byref(info))
+        return len(targets)
+
+
 # ---------------------------------------------------------------- page JS
 # 在页面里查找"正在进行的题目"。返回 null 或一个描述对象，并给候选元素打上 data-pb-id 标记。
 FIND_QUESTION_JS = r"""
@@ -310,6 +405,8 @@ class PollEvBot:
         self.name = cfg["screen_name"]
         self.answered: dict[str, float] = {}
         self.attempts: dict[str, int] = {}
+        self.alerted: set[str] = set()
+        self.attention = Attention()
         self.page = None
         self.context = None
         self.last_reload = time.time()
@@ -427,11 +524,16 @@ class PollEvBot:
         attempt = self.attempts[sig]
         log.info("发现题目（第 %d 次尝试）：%s | 类型=%s | 选项=%s",
                  attempt, q["question"] or "(无标题)", q["kind"], [o["label"] for o in q["options"]])
+        # 同一道题答完后页面上的"You have responded…"会变，题目签名跟着变；提醒只按题干去重
+        alert_key = re.sub(r"\s*You have (not )?responded.*$", "", q["question"] or sig, flags=re.S)
+        if alert_key not in self.alerted:
+            self.alerted.add(alert_key)
+            self.attention.notify(q["question"] or "有新题目")
 
         option_id = None
         if q["kind"] == "open":
             if not self.cfg.get("open_ended_text"):
-                log.info("这是开放题（填空），config 里 open_ended_text 为空，跳过")
+                log.info("这是开放题（填空），config 里 open_ended_text 为空，跳过；请手动作答")
                 self.answered[sig] = time.time()
                 return True
             page.locator(f"[data-pb-id='{q['openEnded']}']").fill(self.cfg["open_ended_text"])

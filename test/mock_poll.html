@@ -119,6 +119,14 @@
     area.innerHTML = `<h1>Q4 answered</h1><p>Your response has been submitted.</p>`;
   }
 
+  // 题目 5：开放题（填空），程序不作答，只在任务栏闪烁提醒
+  function showQ5() {
+    area.innerHTML = `
+      <h1 class="text-xl font-semibold">Q5: What return do you expect? Why?</h1>
+      <form onsubmit="event.preventDefault()"><textarea name="response[value]"></textarea>
+      <button type="submit">Submit</button></form>`;
+  }
+
   function showWaiting() {
     area.innerHTML = `<div id="waiting"><h1>Waiting for mock's presentation to begin...</h1></div>`;
   }
@@ -130,6 +138,8 @@
   setTimeout(showWaiting, 37000);
   setTimeout(() => showQ4(false), 40000);
   setTimeout(showWaiting, 52000);
+  setTimeout(showQ5, 54000);
+  setTimeout(showWaiting, 60000);
 </script>
 </body>
 </html>
