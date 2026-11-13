@@ -2,7 +2,7 @@
 
 > A local Playwright bot for pollev.com: open it before class, it sets your screen name, keeps the screen awake, and answers every multiple-choice poll with a random option. Works on Windows and macOS.
 
-上课前打开它，它会自动进入老师的 Poll Everywhere 页面、填好你的名字，然后一直盯着页面；一旦出现选择题，随机选一个并提交。每出现一道新题，任务栏上的浏览器图标会闪烁提醒你（填空题程序不会答，看到闪烁就自己去答）。运行期间电脑不会息屏、不会休眠。Windows 和 Mac 都能用。
+上课前打开它，它会自动进入老师的 Poll Everywhere 页面、填好你的名字，然后一直盯着页面；一旦出现选择题，随机选一个并提交。每出现一道新题，任务栏上的浏览器图标会闪烁提醒你（填空题默认自动填「1」）。运行期间电脑不会息屏、不会休眠。Windows 和 Mac 都能用。
 
 ## 一、安装（只做一次）
 
@@ -37,7 +37,7 @@
 | `poll_interval_seconds` | 多久检查一次页面（秒） | `1.0` |
 | `reload_if_idle_minutes` | 空闲多久刷新一次页面保活 | `10` |
 | `headless` | `true` 则不显示浏览器窗口 | `false` |
-| `open_ended_text` | 填空题自动填的内容；留空则跳过填空题 | 空 |
+| `open_ended_text` | 填空题自动填的内容；留空则跳过填空题（由你自己答） | `1` |
 
 命令行参数（可选）：
 
@@ -53,7 +53,8 @@ python pollev_bot.py --name "张三"          # 临时换名字
 - 浏览器资料保存在 `browser-profile/` 里，所以名字、Cookie 下次还在。
 - 每 1 秒检查一次页面：找到选择题的选项（单选框 / 复选框 / 按钮式选项）就随机点一个，再点 Submit；没有单独提交按钮的就点选即提交。
 - 提交后会确认页面确实变成"已提交"状态，否则会重试（最多 6 次，中间会刷新页面）。
-- **新题提醒**：每出现一道新题（包括程序不答的填空题），Windows 上浏览器和程序窗口会在任务栏闪烁，直到你点开为止；Mac 上弹出一条系统通知。不会发出声音。
+- **问卷（survey）**：页面显示 Start survey 时自动点进去，每题答完点 Next Question，最后点 Finish。
+- **新题提醒**：每出现一道新题或问卷，Windows 上浏览器和程序窗口会在任务栏闪烁，直到你点开为止；Mac 上弹出一条系统通知。不会发出声音。
 - 实时连接断开超过 30 秒、或页面空闲超过 10 分钟，会自动刷新页面，避免错过题目。
 - **防息屏**：Windows 用系统 API 声明"显示器和系统需要保持开启"并每分钟续期；Mac 启动 `caffeinate -dims`。程序退出时自动恢复原设置。学校/公司强制锁屏策略无法绕过。
 - 每次提交后截图保存到 `logs/`，所有动作记录在 `logs/pollev.log`，方便事后核对。
@@ -63,7 +64,7 @@ python pollev_bot.py --name "张三"          # 临时换名字
 - **双击没反应 / 一闪而过**：多半是 Python 没装或没加进 PATH。在终端里运行 `python --version` 看看。
 - **填错了网址或名字**：打开 `config.json` 改掉对应字段，或者把这个文件删了，下次启动重新问。
 - **想停止**：关掉那个黑色窗口，或按 Ctrl+C。
-- **本地自测**：`python pollev_bot.py --minutes 1.5 --url "file:///完整路径/test/mock_poll.html" --name test` 会用一个模拟页跑一遍所有题型（单选、按钮、多选、点击时题目刷新、填空）。
+- **本地自测**：`python pollev_bot.py --minutes 1.5 --url "file:///完整路径/test/mock_poll.html" --name test` 会用一个模拟页跑一遍所有题型（单选、按钮、多选、点击时题目刷新、填空、问卷）。
 
 ## 开源协议
 

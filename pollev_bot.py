@@ -23,7 +23,6 @@ import logging
 import os
 import platform
 import random
-import re
 import subprocess
 import sys
 import time
@@ -46,7 +45,7 @@ DEFAULT_CONFIG = {
     "poll_interval_seconds": 1.0,
     "reload_if_idle_minutes": 10,
     "headless": False,
-    "open_ended_text": "",
+    "open_ended_text": "1",
 }
 
 # ---------------------------------------------------------------- logging
@@ -329,7 +328,7 @@ FIND_QUESTION_JS = r"""
         const sig = (e.className + ' ' + Object.keys(e.dataset).join(' ') + ' ' + (e.getAttribute('name') || '') + ' ' + (e.getAttribute('value') || '')).toLowerCase();
         return /option|choice|answer/.test(sig);
       })
-      .filter(e => !/^(submit|send|vote|提交|skip|continue|change|clear|undo|cancel|ok)$/i.test(text(e)));
+      .filter(e => !/^(submit|send|vote|提交|skip|continue|change|clear|undo|cancel|ok|next|next question|previous|finish|finish survey|start survey)$/i.test(text(e)));
     const inner = cands.filter(e => !cands.some(o => o !== e && e.contains(o)));
     if (inner.length >= 2) {
       kind = 'button';
@@ -352,8 +351,9 @@ FIND_QUESTION_JS = r"""
   const form = anchor ? anchor.closest('form') : null;
   const scope = form || root;
   const isSubmitText = b => /^(submit|send|vote|提交|answer|respond|done)$/i.test(text(b) || b.value || '');
+  const isNav = b => /^(next|next question|previous|finish|finish survey|start survey)$/i.test(text(b) || b.value || '');
   let submit = [...scope.querySelectorAll('button, input[type="submit"]')]
-    .filter(b => !inExcluded(b) && visible(b) && !b.disabled)
+    .filter(b => !inExcluded(b) && visible(b) && !b.disabled && !isNav(b))
     .find(b => b.type === 'submit' || isSubmitText(b));
   if (!submit && scope !== root) {
     submit = [...root.querySelectorAll('button, input[type="submit"]')]
@@ -362,9 +362,34 @@ FIND_QUESTION_JS = r"""
   }
 
   const heading = root.querySelector('h1, h2, h3, legend, [class*="title"], [class*="question"], [class*="prompt"]');
-  const question = heading ? text(heading).slice(0, 200) : '';
+  // 页面上的"You have responded N times / No responses submitted yet"会随作答变化，不能放进签名
+  const m = text(root).match(/you have responded (once|(\d+) times)/i);
+  const respondedCount = m ? (m[2] ? +m[2] : 1) : 0;
+  const question = (heading ? text(heading) : '')
+    .replace(/\s*(you have (not )?responded|no responses submitted).*$/i, '').slice(0, 200);
   const sig = JSON.stringify({ q: question, o: options.map(o => o.label), a: form ? form.getAttribute('action') : '', k: kind || 'open' });
-  return { kind: kind || 'open', question, options, openEnded, submitId: submit ? tag(submit) : null, formAction: form ? form.getAttribute('action') : null, signature: sig };
+  return { kind: kind || 'open', question, options, openEnded, respondedCount, submitId: submit ? tag(submit) : null, formAction: form ? form.getAttribute('action') : null, signature: sig };
+}
+"""
+
+# 问卷（survey）的导航按钮：Start survey / Next Question / Finish
+SURVEY_NAV_JS = r"""
+() => {
+  const root = document.querySelector('#active_tab_content') || document.querySelector('#main-content') || document.querySelector('main') || document.body;
+  const visible = el => { const r = el.getBoundingClientRect(); const s = getComputedStyle(el); return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none'; };
+  const text = el => (el.innerText || el.textContent || el.value || '').replace(/\s+/g, ' ').trim();
+  let seq = 0;
+  const tag = el => { if (!el.dataset.pbId) el.dataset.pbId = 'pbnav' + Date.now() + '_' + (seq++); return el.dataset.pbId; };
+  const btns = [...root.querySelectorAll('button, a, input[type="submit"], input[type="button"]')]
+    .filter(b => visible(b) && !b.disabled && b.getAttribute('aria-disabled') !== 'true');
+  const find = re => { const b = btns.find(b => re.test(text(b))); return b ? tag(b) : null; };
+  const title = root.querySelector('h1, h2');
+  return {
+    start: find(/^(start|begin|take) survey$/i),
+    next: find(/^next( question)?$/i),
+    finish: find(/^finish( survey)?$/i),
+    title: (title ? text(title) : '').slice(0, 120),
+  };
 }
 """
 
@@ -373,7 +398,7 @@ CHECK_STATE_JS = r"""
 (ids) => {
   const visible = el => { if (!el) return false; const r = el.getBoundingClientRect(); const s = getComputedStyle(el); return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none'; };
   const root = document.querySelector('#active_tab_content') || document.querySelector('main') || document.body;
-  const t = (root.innerText || '').toLowerCase();
+  const t = (root.innerText || '').toLowerCase().replace(/no responses submitted yet/g, '');
   const successText = /thank|submitted|received|your response|you responded|response sent|已提交|感谢|change response|edit response|responses? are closed/.test(t);
   const submit = ids.submitId ? document.querySelector('[data-pb-id="' + ids.submitId + '"]') : null;
   const opt = ids.optionId ? document.querySelector('[data-pb-id="' + ids.optionId + '"]') : null;
@@ -406,6 +431,9 @@ class PollEvBot:
         self.answered: dict[str, float] = {}
         self.attempts: dict[str, int] = {}
         self.alerted: set[str] = set()
+        self.survey_start_clicked: dict[str, float] = {}   # 问卷封面 -> 上次点 Start survey 的时间
+        self.survey_finished: set[str] = set()
+        self.current_survey = ""
         self.attention = Attention()
         self.page = None
         self.context = None
@@ -524,10 +552,8 @@ class PollEvBot:
         attempt = self.attempts[sig]
         log.info("发现题目（第 %d 次尝试）：%s | 类型=%s | 选项=%s",
                  attempt, q["question"] or "(无标题)", q["kind"], [o["label"] for o in q["options"]])
-        # 同一道题答完后页面上的"You have responded…"会变，题目签名跟着变；提醒只按题干去重
-        alert_key = re.sub(r"\s*You have (not )?responded.*$", "", q["question"] or sig, flags=re.S)
-        if alert_key not in self.alerted:
-            self.alerted.add(alert_key)
+        if sig not in self.alerted:
+            self.alerted.add(sig)
             self.attention.notify(q["question"] or "有新题目")
 
         option_id = None
@@ -536,7 +562,13 @@ class PollEvBot:
                 log.info("这是开放题（填空），config 里 open_ended_text 为空，跳过；请手动作答")
                 self.answered[sig] = time.time()
                 return True
-            page.locator(f"[data-pb-id='{q['openEnded']}']").fill(self.cfg["open_ended_text"])
+            log.info("开放题（填空），填入「%s」", self.cfg["open_ended_text"])
+            try:
+                page.locator(f"[data-pb-id='{q['openEnded']}']").first.fill(self.cfg["open_ended_text"], timeout=1500)
+            except Exception:
+                log.info("输入框已从页面上消失，立即重新扫描")
+                return False
+            page.wait_for_timeout(300)
         else:
             choice = random.choice(q["options"])
             option_id = choice["id"]
@@ -570,7 +602,7 @@ class PollEvBot:
         else:
             log.info("没有单独的提交按钮，视为点选即提交")
 
-        ok = self.wait_submitted(sig, option_id, submit_id)
+        ok = self.wait_submitted(sig, option_id, submit_id, q.get("respondedCount", 0))
         if ok:
             self.answered[sig] = time.time()
             self.snapshot("answered")
@@ -580,7 +612,7 @@ class PollEvBot:
             log.warning("无法确认提交是否成功，稍后重试")
         return ok
 
-    def wait_submitted(self, sig, option_id, submit_id, timeout=10.0) -> bool:
+    def wait_submitted(self, sig, option_id, submit_id, responded_before=0, timeout=10.0) -> bool:
         """确认答案真的交上去了。
 
         只看"按钮/选项不见了"不够：页面重新渲染同一道题时它们也会消失。
@@ -594,6 +626,9 @@ class PollEvBot:
                 st = {}
             if st.get("successText"):
                 return True
+            now_q = self.find_question()
+            if now_q and now_q["signature"] == sig and now_q.get("respondedCount", 0) > responded_before:
+                return True              # 页面显示"You have responded"次数增加了
             if submit_id:
                 changed = not st.get("submitVisible")
             else:
@@ -608,6 +643,47 @@ class PollEvBot:
                 return False
             self.page.wait_for_timeout(500)
         return False
+
+    # ---------- survey（问卷：先点 Start survey，答完一题点 Next Question，最后点 Finish）
+    def _survey_nav(self) -> dict:
+        try:
+            return self.page.evaluate(SURVEY_NAV_JS) or {}
+        except Exception:
+            return {}
+
+    def survey_start(self) -> bool:
+        """页面停在问卷封面时点 Start survey。返回 True 表示点了。"""
+        nav = self._survey_nav()
+        if not nav.get("start"):
+            return False
+        key = nav.get("title") or "survey"
+        if key in self.survey_finished:
+            return False
+        if time.time() - self.survey_start_clicked.get(key, 0) < 20:
+            return False
+        if key not in self.survey_start_clicked:
+            self.attention.notify(f"问卷：{key}")
+        self.survey_start_clicked[key] = time.time()
+        self.current_survey = key
+        log.info("发现问卷「%s」，点击 Start survey", key)
+        if self._click(nav["start"], "Start survey 按钮"):
+            self.last_reload = time.time()
+            self.page.wait_for_timeout(800)
+        return True
+
+    def survey_advance(self):
+        """当前题已答完：问卷里有 Next Question 就点下一题，最后一题点 Finish。"""
+        nav = self._survey_nav()
+        if nav.get("next"):
+            log.info("点击 Next Question 进入下一题")
+            self._click(nav["next"], "Next Question 按钮")
+            self.page.wait_for_timeout(800)
+        elif nav.get("finish"):
+            log.info("问卷最后一题已答完，点击 Finish")
+            if self._click(nav["finish"], "Finish 按钮"):
+                if self.current_survey:
+                    self.survey_finished.add(self.current_survey)
+                self.page.wait_for_timeout(800)
 
     def snapshot(self, tag: str):
         try:
@@ -654,7 +730,11 @@ class PollEvBot:
                     if q:
                         sig = q["signature"]
                         if sig in self.answered:
-                            pass
+                            self.survey_advance()
+                        elif q.get("respondedCount"):
+                            log.info("这道题已经作答过（页面显示 You have responded），跳过：%s", q["question"])
+                            self.answered[sig] = time.time()
+                            self.survey_advance()
                         elif self.attempts.get(sig, 0) >= 6:
                             log.error("这道题尝试 6 次仍无法确认，放弃并刷新页面：%s", q["question"])
                             self.answered[sig] = time.time()
@@ -666,7 +746,8 @@ class PollEvBot:
                                     self.open_site()
                                 time.sleep(0.2)          # 没答上：几乎不等待，马上重新扫描
                                 continue
-                    else:
+                            self.survey_advance()
+                    elif not self.survey_start():
                         self.health_check()
                     time.sleep(interval)
                 except KeyboardInterrupt:

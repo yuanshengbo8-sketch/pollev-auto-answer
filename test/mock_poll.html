@@ -127,6 +127,38 @@
       <button type="submit">Submit</button></form>`;
   }
 
+  // 问卷：封面 Start survey → 第 1 题填空 → Next Question → 第 2 题单选 → Finish → 回到封面
+  const survey = { idx: 0, counts: [0, 0] };
+  function showSurveyCover() {
+    area.innerHTML = `<h1>Belief on Market Index Return</h1><p>2 questions</p>
+      <button type="button" onclick="survey.idx=0; showSurveyQ()">Start survey</button>`;
+  }
+  function showSurveyQ() {
+    const i = survey.idx, n = survey.counts[i];
+    const status = n ? `You have responded ${n === 1 ? 'once' : n + ' times'}` : 'You have not responded No responses submitted yet.';
+    const body = i === 0
+      ? `<textarea name="response[value]"></textarea>`
+      : ['Up','Down','Flat'].map((t,k)=>`<label><input type="radio" name="response[option_id]" value="${k}"> ${t}</label><br>`).join('');
+    area.innerHTML = `
+      <div class="survey-question">
+        <h1>Question ${i+1} of 2: ${i === 0 ? 'Expected monthly return? Why?' : 'Market direction next year?'}</h1>
+        <p>${status}</p>
+        <form onsubmit="submitSurvey(event)">${body}<button type="submit">Submit</button></form>
+        ${i > 0 ? '<button type="button" onclick="survey.idx--; showSurveyQ()">Previous</button>' : ''}
+        ${i === 0 ? '<button type="button" onclick="survey.idx++; showSurveyQ()">Next Question</button>'
+                  : '<button type="button" onclick="log.push(\'survey:finish\'); showSurveyCover()">Finish</button>'}
+      </div>`;
+  }
+  function submitSurvey(e) {
+    e.preventDefault();
+    const ta = e.target.querySelector('textarea');
+    const val = ta ? ta.value : [...e.target.querySelectorAll('input:checked')].map(i => i.value).join(',');
+    if (!val) return;
+    log.push('survey' + survey.idx + ':' + val);
+    survey.counts[survey.idx]++;
+    showSurveyQ();
+  }
+
   function showWaiting() {
     area.innerHTML = `<div id="waiting"><h1>Waiting for mock's presentation to begin...</h1></div>`;
   }
@@ -140,6 +172,7 @@
   setTimeout(showWaiting, 52000);
   setTimeout(showQ5, 54000);
   setTimeout(showWaiting, 60000);
+  setTimeout(showSurveyCover, 62000);
 </script>
 </body>
 </html>
